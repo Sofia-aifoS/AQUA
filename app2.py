@@ -4,11 +4,26 @@ from dotenv import load_dotenv
 import openai
 import tempfile
 from pathlib import Path
-from models import SessionLocal, Messages
+from models import SessionLocal, Messages, Users
 from datetime import datetime
+import bcrypt
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
+
+def check_login(username, password):
+    session = SessionLocal()
+    user = session.query(Users).filter_by(username=username).first()
+    session.close()
+    if user and bcrypt.checkpw(password.encode('utf-8'), user.password.encode('utf-8')):
+        return True
+    return False
+
+def login_fn(username, password):
+    if check_login(username, password):
+        return gr.update(visible=False), gr.update(visible=True), ""
+    else:
+        return gr.update(visible=True), gr.update(visible=False), "Credenziali errate."
 
 def trascrivi(audio_path):
     with open(audio_path, "rb") as audio_file:
@@ -16,24 +31,9 @@ def trascrivi(audio_path):
             model="gpt-4o-mini-transcribe",
             file=audio_file
         )
-
     print('User: ', transcription.text)
     return transcription.text
-'''
-def genera_risposta(messaggi):
-    response = openai.chat.completions.create( # da cambiare in completions.create
-        model=os.getenv("MODEL_ID"),
-        messages=messaggi,
-        temperature=1,
-        max_tokens=2048,
-        top_p=1,
-        frequency_penalty=0,
-        presence_penalty=0
-    )
 
-    print("Assistente: ", response.choices[0].message.content)
-    return response.choices[0].message.content
-    '''
 def genera_risposta(conversazione_history):
     response = openai.responses.create(
         model=os.getenv("MODEL_ID"),
@@ -46,17 +46,12 @@ def genera_risposta(conversazione_history):
         max_output_tokens=2048,
         store=True
     )
-
     print("Assistente: ", response.output[0].content[0].text)
     return response.output[0].content[0].text
 
-
 def sintetizza_tts(testo):
-    # Create a temporary file for the audio
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
         temp_path = temp_file.name
-
-    # Use the streaming response to generate the audio file
     with openai.audio.speech.with_streaming_response.create(
             model="gpt-4o-mini-tts",
             voice="shimmer",
@@ -64,51 +59,20 @@ def sintetizza_tts(testo):
             instructions="Adotta un tono vivace e interrogativo, come chi vuole davvero capire, ma non accetta risposte vaghe. Incalza con curiosità, mantenendo sempre un rispetto profondo."
     ) as response:
         response.stream_to_file(temp_path)
-
     return temp_path
-'''
-# Stato iniziale con il messaggio di sistema
-messaggi = [
-    {
-        "role": "system",
-        "content": "Sei un tutor socratico esperto della laguna di Venezia. Guida l'utente attraverso domande per esplorare e comprendere i dati della laguna."
-    }
-]
 
-
-def conversazione(audio):
-    testo_utente = trascrivi(audio)
-    messaggi.append({"role": "user", "content": testo_utente})
-    risposta = genera_risposta(messaggi)
-    messaggi.append({"role": "assistant", "content": risposta})
-    audio_risposta = sintetizza_tts(risposta)
-    return testo_utente, risposta, audio_risposta
-'''
-
-# Conversation history for the playground prompt
 conversazione_history = []
 
-
 def conversazione(audio):
     testo_utente = trascrivi(audio)
-
-    # Add user message to conversation history
     conversazione_history.append({"role": "user", "content": testo_utente})
-
-    # Generate response using playground prompt
     risposta = genera_risposta(conversazione_history)
-
-    # Add assistant response to conversation history
     conversazione_history.append({"role": "assistant", "content": risposta})
-
-    # audio_risposta = sintetizza_tts(risposta)
-
-    # Salva tutti i messaggi in conversazione_history nel DB
+    audio_risposta = sintetizza_tts(risposta)
     session = SessionLocal()
-    user_id = "574ead43-5697-49d5-af9c-d97496b4c2e7"
-    chat_id = "f0f42ee7-1408-446f-b3ac-12f502f4378b"
+    user_id = 1
+    chat_id = 1
     for idx, msg in enumerate(conversazione_history):
-        # Salva solo se non già presente (per evitare duplicati)
         exists = session.query(Messages).filter_by(user_id=user_id, chat_id=chat_id, order=idx).first()
         if not exists:
             session.add(Messages(
@@ -122,22 +86,26 @@ def conversazione(audio):
             ))
     session.commit()
     session.close()
-
-    return testo_utente, risposta #, audio_risposta
-
+    return testo_utente, risposta, audio_risposta
 
 with gr.Blocks() as demo:
-    gr.Markdown("## Parla con AQUA")
-    with gr.Row():
-        audio_input = gr.Audio(sources=["microphone"], type="filepath", label="Parla qui")
-        audio_output = gr.Audio(label="Risposta Audio", autoplay=True)
-    with gr.Row():
-        testo_input_utente = gr.Textbox(label="Hai detto:")
-        testo_output_AQUA = gr.Textbox(label="AQUA: ")
-    audio_input.stop_recording(conversazione, inputs=audio_input, outputs=[testo_input_utente, testo_output_AQUA]) #, audio_output
+    login_box = gr.Column(visible=True)
+    chat_box = gr.Column(visible=False)
+    with login_box:
+        gr.Markdown("## Login AQUA")
+        username = gr.Textbox(label="Username")
+        password = gr.Textbox(label="Password", type="password")
+        login_btn = gr.Button("Login")
+        login_error = gr.Textbox(label="Errore login", visible=True)
+        login_btn.click(login_fn, inputs=[username, password], outputs=[login_box, chat_box, login_error])
+    with chat_box:
+        gr.Markdown("## Parla con AQUA")
+        with gr.Row():
+            audio_input = gr.Audio(sources=["microphone"], type="filepath", label="Parla qui")
+            audio_output = gr.Audio(label="Risposta Audio", autoplay=True)
+        with gr.Row():
+            testo_input_utente = gr.Textbox(label="Hai detto:")
+            testo_output_AQUA = gr.Textbox(label="AQUA: ")
+        audio_input.stop_recording(conversazione, inputs=audio_input, outputs=[testo_input_utente, testo_output_AQUA, audio_output])
 
 demo.launch()
-
-
-
-# lavorare su intefaccia < simile a chatgpt vocale
